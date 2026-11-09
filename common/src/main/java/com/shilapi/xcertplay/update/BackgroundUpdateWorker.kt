@@ -38,7 +38,7 @@ internal class BackgroundUpdateWorker(context: Context, parameters: WorkerParame
             ?: return Result.success()
         val network = runCatching { InternetNetworkSelector.select(connectivity) }
             .onFailure { Log.i(TAG, "network lookup failed", it) }
-            .getOrNull() ?: return retryOrGiveUp("no validated network")
+            .getOrNull() ?: return retryOrGiveUp("no internet network")
         val packageInfo = applicationContext.packageManager
             .getPackageInfo(applicationContext.packageName, 0)
         val installedVersionCode = PackageInfoCompat.getLongVersionCode(packageInfo)

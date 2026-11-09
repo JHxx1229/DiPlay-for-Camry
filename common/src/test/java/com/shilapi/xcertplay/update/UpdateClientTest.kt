@@ -93,6 +93,29 @@ class UpdateClientTest {
     }
 
     @Test
+    fun downloadUsesTheSuppliedNetworkConnectionFactory() {
+        val payload = "checksum".toByteArray()
+        server.createContext("/selected-download") { exchange ->
+            exchange.sendResponseHeaders(200, payload.size.toLong())
+            exchange.responseBody.use { it.write(payload) }
+        }
+        val selected = AtomicBoolean()
+        val destination = File(temporaryFolder.root, "update/SHA256SUMS")
+
+        UpdateClient.download(
+            "$root/selected-download",
+            destination,
+            openConnection = { url ->
+                selected.set(true)
+                url.openConnection()
+            },
+        ) { _, _ -> }
+
+        assertTrue(selected.get())
+        assertEquals(payload.toList(), destination.readBytes().toList())
+    }
+
+    @Test
     fun failedDownloadsLeaveNoPartialFile() {
         server.createContext("/apk") { exchange ->
             exchange.sendResponseHeaders(200, 1024L)

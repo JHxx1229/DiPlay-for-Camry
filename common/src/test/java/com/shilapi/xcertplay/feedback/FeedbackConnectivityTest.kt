@@ -79,8 +79,10 @@ class FeedbackConnectivityTest {
         assertNull(FeedbackConnectivity.select(manager))
     }
 
-    @Test fun updateSelectorStillRequiresValidation() {
-        assertTrue(InternetNetworkSelector.isValidatedInternet(hasInternet = true, validated = true))
-        assertFalse(InternetNetworkSelector.isValidatedInternet(hasInternet = true, validated = false))
+    @Test fun updateSelectorSharesHeadUnitFallbackPolicy() {
+        val cellular = network(101, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(cellular, InternetNetworkSelector.select(manager))
+        val wifi = network(102, NetworkCapabilities.TRANSPORT_WIFI, validated = true)
+        assertEquals(wifi, InternetNetworkSelector.select(manager))
     }
 }

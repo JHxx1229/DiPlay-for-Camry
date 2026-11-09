@@ -92,6 +92,7 @@ import com.shilapi.xcertplay.setup.SetupGuide
 import com.shilapi.xcertplay.transport.EvChargingConnectors
 import com.shilapi.xcertplay.transport.UsbSessionDiagnostics
 import com.shilapi.xcertplay.update.BackgroundUpdateScheduler
+import com.shilapi.xcertplay.update.InternetNetworkSelector
 import com.shilapi.xcertplay.update.UpdateApkExport
 import com.shilapi.xcertplay.update.UpdateAvailability
 import com.shilapi.xcertplay.update.UpdateCatalog
@@ -3124,10 +3125,12 @@ class DiPlayActivity : ComponentActivity(), AppAppearanceOwner {
     }
 
     private fun latestRelease(channel: UpdateChannel): UpdateLookupResult {
+        val appContext = applicationContext
         return UpdateReleaseLookup.latest(
             installedVersionCode(),
             userAgent(),
             channel,
+            openConnection = { InternetNetworkSelector.openConnection(appContext, it) },
             clientId = checkNotNull(StableClientId.get(this)) { "Update client ID unavailable" },
         )
     }
@@ -3164,6 +3167,7 @@ class DiPlayActivity : ComponentActivity(), AppAppearanceOwner {
         updateMessage = null
         val generation = ++updateGeneration
         val channel = UpdateChannelStore.load(this)
+        val appContext = applicationContext
         render()
         Thread({
             // Each attempt owns its files, including across activity recreation.
@@ -3176,10 +3180,13 @@ class DiPlayActivity : ComponentActivity(), AppAppearanceOwner {
                     UpdateLookupResult.ChannelUnavailable ->
                         throw IOException(getString(R.string.update_channel_unavailable))
                 }
+                val openConnection: (java.net.URL) -> java.net.URLConnection = {
+                    InternetNetworkSelector.openConnection(appContext, it)
+                }
                 val checksumsFile = File(directory, UpdateCatalog.CHECKSUMS_FILE)
-                UpdateClient.download(release.checksumsUrl, checksumsFile) { _, _ -> }
+                UpdateClient.download(release.checksumsUrl, checksumsFile, openConnection) { _, _ -> }
                 val apkFile = File(directory, release.apkName)
-                UpdateClient.download(release.apkUrl, apkFile) { written, total ->
+                UpdateClient.download(release.apkUrl, apkFile, openConnection) { written, total ->
                     val percent = total?.takeIf { it > 0 }?.let { (written * 100 / it).toInt() } ?: return@download
                     if (percent != updateProgress) {
                         updateProgress = percent
