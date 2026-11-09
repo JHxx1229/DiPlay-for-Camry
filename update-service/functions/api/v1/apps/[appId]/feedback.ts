@@ -121,8 +121,12 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, params }
     await putJson(env.META, keys.pointerKey, pointer);
   } catch {
     // Write the bundle before the index; if the index or pointer fails, remove
-    // the zip so the admin list never shows a dangling record.
-    await env.META.delete(keys.objectKey).catch(() => undefined);
+    // any written keys so the admin list never shows a dangling record.
+    await Promise.allSettled([
+      env.META.delete(keys.pointerKey),
+      env.META.delete(keys.indexKey),
+      env.META.delete(keys.objectKey),
+    ]);
     return rejected("storage_failed", 500);
   }
 

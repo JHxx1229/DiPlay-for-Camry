@@ -394,6 +394,25 @@ describe("feedback upload", () => {
     const response = await post(bucket, { appId: "Bad App", bytes, meta: await metaFor(id, bytes) });
     expect(response.status).toBe(400);
   });
+
+  it("removes both bundle and index if writing the pointer key fails", async () => {
+    const bucket = memoryBucket();
+    const originalPut = bucket.put.bind(bucket);
+    bucket.put = async (key: string, value: unknown) => {
+      if (key.includes("/by-id/")) throw new Error("simulated pointer put failure");
+      return originalPut(key, value);
+    };
+
+    const { response } = await uploadValid(bucket, 12);
+    expect(response.status).toBe(500);
+    expect((await response.json()) as any).toMatchObject({ error: "storage_failed" });
+    expect(bucket.store.size).toBe(0);
+
+    const { env, headers } = await adminContext(bucket);
+    const listResponse = await call(listFeedback, env, { headers, url: `${BASE}/api/v1/admin/feedback?limit=50` });
+    expect(listResponse.status).toBe(200);
+    expect(((await listResponse.json()) as any).items).toHaveLength(0);
+  });
 });
 
 describe("admin feedback API", () => {
