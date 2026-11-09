@@ -19,30 +19,41 @@ internal class FeedbackUploadWorker(context: Context, parameters: WorkerParamete
         val records = FeedbackOutbox.pending(context)
         if (records.isEmpty()) return Result.success()
 
+        var shouldRetry = false
         for (record in records) {
             if (!record.userInitiated &&
                 (CarPlayBackgroundSession.hasSession() || CarPlayBackgroundSession.active)
             ) {
-                return Result.retry()
+                shouldRetry = true
+                continue
             }
-            FeedbackOutbox.markUploading(context, record.meta.id)
-            val result = FeedbackUploader.upload(
-                context = context,
-                meta = record.meta,
-                bundle = FeedbackOutbox.bundle(context, record.meta.id),
-            )
+            if (!FeedbackOutbox.markUploading(context, record.meta.id)) {
+                continue
+            }
+            val result = try {
+                FeedbackUploader.upload(
+                    context = context,
+                    meta = record.meta,
+                    bundle = FeedbackOutbox.bundle(context, record.meta.id),
+                )
+            } catch (failure: Throwable) {
+                FeedbackUploader.Result.Retryable(failure.message ?: failure.javaClass.simpleName)
+            }
             when (result) {
                 is FeedbackUploader.Result.Sent -> FeedbackOutbox.markSent(context, record.meta.id)
                 is FeedbackUploader.Result.Retryable -> {
                     FeedbackOutbox.markRetryable(context, record.meta.id, result.reason)
-                    return Result.retry()
+                    shouldRetry = true
                 }
                 is FeedbackUploader.Result.Permanent -> {
                     FeedbackOutbox.markPermanent(context, record.meta.id, result.reason)
                 }
             }
         }
-        return Result.success()
+        if (shouldRetry && isStopped) {
+            FeedbackScheduler.schedule(context, immediate = false)
+        }
+        return if (shouldRetry) Result.retry() else Result.success()
     }
 }
 

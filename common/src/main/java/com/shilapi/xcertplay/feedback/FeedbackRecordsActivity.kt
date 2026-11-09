@@ -197,9 +197,12 @@ class FeedbackRecordsActivity : ComponentActivity(), AppAppearanceOwner {
                 minHeight = dp(46)
                 style(DiPlayButtonKind.SECONDARY, palette, overlay = false)
                 setOnClickListener {
-                    permanent.forEach { FeedbackOutbox.markRetryable(this@FeedbackRecordsActivity, it.meta.id, "manual_retry") }
+                    (permanent + pending)
+                        .filter { it.state != FeedbackState.UPLOADING }
+                        .forEach { FeedbackOutbox.requeueForManualRetry(this@FeedbackRecordsActivity, it.meta.id) }
                     FeedbackScheduler.schedule(this@FeedbackRecordsActivity, immediate = true)
                     toast(getString(R.string.feedback_retrying))
+                    render()
                     handler.postDelayed({ render() }, 900)
                 }
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(12) })
@@ -329,9 +332,10 @@ class FeedbackRecordsActivity : ComponentActivity(), AppAppearanceOwner {
     }
 
     private fun retry(record: FeedbackRecord) {
-        FeedbackOutbox.markRetryable(this, record.meta.id, "manual_retry")
+        FeedbackOutbox.requeueForManualRetry(this, record.meta.id)
         toast(getString(R.string.feedback_retrying))
         FeedbackScheduler.schedule(this, immediate = true)
+        render()
         handler.postDelayed({ render() }, 900)
     }
 

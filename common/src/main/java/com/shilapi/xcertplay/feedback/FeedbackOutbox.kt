@@ -20,11 +20,13 @@ internal object FeedbackOutbox {
     internal const val MAX_SENT = 10
     private const val PERMANENT_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
     private const val SENT_RETENTION_MS = 30L * 24 * 60 * 60 * 1000
+    private val activeUploads = HashSet<String>()
 
     @Synchronized
     fun enqueue(context: Context, meta: FeedbackMeta, bundle: File): FeedbackRecord {
         cleanup(context)
         if (pending(context).size >= MAX_PENDING) throw FeedbackQueueFullException()
+        activeUploads.remove(meta.id)
         val directory = recordDirectory(context, meta.id)
         if (directory.exists()) directory.deleteRecursively()
         check(directory.mkdirs()) { "Could not create the feedback record directory" }
@@ -76,16 +78,33 @@ internal object FeedbackOutbox {
     fun bundle(context: Context, id: String): File = File(recordDirectory(context, id), BUNDLE_NAME)
 
     @Synchronized
-    fun markUploading(context: Context, id: String) {
+    fun markUploading(context: Context, id: String): Boolean {
+        if (!activeUploads.add(id)) return false
+        val file = File(recordDirectory(context, id), STATE_NAME)
+        if (!file.isFile) {
+            activeUploads.remove(id)
+            return false
+        }
+        val state = readJson(file) ?: JSONObject()
+        state.put("state", FeedbackState.UPLOADING.name)
+        state.put("attempts", state.optInt("attempts") + 1)
+        state.put("lastAttemptAt", System.currentTimeMillis())
+        writeJson(file, state)
+        return true
+    }
+
+    @Synchronized
+    fun requeueForManualRetry(context: Context, id: String) {
+        if (id in activeUploads) return
         updateState(context, id) { state ->
-            state.put("state", FeedbackState.UPLOADING.name)
-            state.put("attempts", state.optInt("attempts") + 1)
-            state.put("lastAttemptAt", System.currentTimeMillis())
+            state.put("state", FeedbackState.PENDING.name)
+            state.put("userInitiated", true)
         }
     }
 
     @Synchronized
     fun markRetryable(context: Context, id: String, reason: String) {
+        activeUploads.remove(id)
         updateState(context, id) { state ->
             state.put("state", FeedbackState.FAILED_RETRYABLE.name)
             state.put("lastError", reason.take(500))
@@ -97,6 +116,7 @@ internal object FeedbackOutbox {
 
     @Synchronized
     fun markPermanent(context: Context, id: String, reason: String) {
+        activeUploads.remove(id)
         updateState(context, id) { state ->
             state.put("state", FeedbackState.FAILED_PERMANENT.name)
             state.put("lastError", reason.take(500))
@@ -108,7 +128,9 @@ internal object FeedbackOutbox {
 
     @Synchronized
     fun markSent(context: Context, id: String) {
-        val record = readRecord(recordDirectory(context, id)) ?: return
+        val record = readRecord(recordDirectory(context, id))
+        activeUploads.remove(id)
+        record ?: return
         val sent = sentHistory(context).filterNot { it.id == id } + SentFeedback(
             id = record.meta.id,
             category = record.meta.category,
@@ -121,7 +143,13 @@ internal object FeedbackOutbox {
 
     @Synchronized
     fun delete(context: Context, id: String) {
+        activeUploads.remove(id)
         recordDirectory(context, id).deleteRecursively()
+    }
+
+    @Synchronized
+    internal fun clearActiveUploadsForTest() {
+        activeUploads.clear()
     }
 
     @Synchronized
@@ -178,8 +206,18 @@ internal object FeedbackOutbox {
     private fun readRecord(directory: File): FeedbackRecord? {
         if (!directory.isDirectory) return null
         val meta = readJson(File(directory, META_NAME))?.let(FeedbackMeta::fromJson) ?: return null
-        val state = readJson(File(directory, STATE_NAME)) ?: JSONObject()
-        return FeedbackRecord.fromJson(meta, state)
+        val stateFile = File(directory, STATE_NAME)
+        val state = readJson(stateFile) ?: JSONObject()
+        val record = FeedbackRecord.fromJson(meta, state)
+        if (record.state == FeedbackState.UPLOADING && meta.id !in activeUploads) {
+            val recovered = record.copy(
+                state = FeedbackState.FAILED_RETRYABLE,
+                userInitiated = false,
+            )
+            writeJson(stateFile, recovered.stateJson())
+            return recovered
+        }
+        return record
     }
 
     private fun readSent(context: Context): List<SentFeedback> {

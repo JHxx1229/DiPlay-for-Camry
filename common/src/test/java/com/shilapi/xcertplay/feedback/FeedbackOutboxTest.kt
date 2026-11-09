@@ -95,6 +95,44 @@ class FeedbackOutboxTest {
         assertTrue(FeedbackOutbox.sentHistory(context).isEmpty())
     }
 
+    @Test
+    fun manualRetryPreservesLastErrorAndRestoresUserInitiated() {
+        val retryable = FeedbackOutbox.enqueue(context, meta(1), bundle())
+        FeedbackOutbox.markRetryable(context, retryable.meta.id, "network: SocketTimeoutException")
+        val afterFailure = FeedbackOutbox.record(context, retryable.meta.id)!!
+        assertEquals(FeedbackState.FAILED_RETRYABLE, afterFailure.state)
+        assertFalse(afterFailure.userInitiated)
+        assertEquals("network: SocketTimeoutException", afterFailure.lastError)
+
+        FeedbackOutbox.requeueForManualRetry(context, retryable.meta.id)
+        val requeued = FeedbackOutbox.record(context, retryable.meta.id)!!
+        assertEquals(FeedbackState.PENDING, requeued.state)
+        assertTrue(requeued.userInitiated)
+        assertEquals("network: SocketTimeoutException", requeued.lastError)
+
+        val permanent = FeedbackOutbox.enqueue(context, meta(2), bundle())
+        FeedbackOutbox.markPermanent(context, permanent.meta.id, "server_500")
+        FeedbackOutbox.requeueForManualRetry(context, permanent.meta.id)
+        val requeuedPermanent = FeedbackOutbox.record(context, permanent.meta.id)!!
+        assertEquals(FeedbackState.PENDING, requeuedPermanent.state)
+        assertTrue(requeuedPermanent.userInitiated)
+        assertEquals("server_500", requeuedPermanent.lastError)
+    }
+
+    @Test
+    fun orphanedUploadingRecordRecoversAfterProcessRestart() {
+        val record = FeedbackOutbox.enqueue(context, meta(1), bundle())
+        assertTrue(FeedbackOutbox.markUploading(context, record.meta.id))
+        assertFalse(FeedbackOutbox.markUploading(context, record.meta.id))
+        assertEquals(FeedbackState.UPLOADING, FeedbackOutbox.record(context, record.meta.id)?.state)
+
+        FeedbackOutbox.clearActiveUploadsForTest()
+        val recovered = FeedbackOutbox.record(context, record.meta.id)!!
+        assertEquals(FeedbackState.FAILED_RETRYABLE, recovered.state)
+        assertFalse(recovered.userInitiated)
+        assertEquals(1, recovered.attempts)
+    }
+
     private fun meta(index: Int, description: String = "description") = FeedbackMeta(
         id = index.toString().padStart(32, '0'),
         category = FeedbackCategory.OTHER,
@@ -108,6 +146,7 @@ class FeedbackOutboxTest {
     }
 
     private fun clear() {
+        FeedbackOutbox.clearActiveUploadsForTest()
         File(context.filesDir, "feedback-outbox").deleteRecursively()
         File(context.filesDir, "feedback-sent.json").delete()
     }
