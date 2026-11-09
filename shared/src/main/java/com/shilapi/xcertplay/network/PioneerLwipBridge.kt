@@ -179,15 +179,20 @@ internal class PioneerLwipBridge(
                 running.set(false)
                 rebuild.getAndSet(null)?.countDown()
                 writer?.interrupt()
-                writer?.join(2_000)
-                var clean = writer?.isAlive != true
-                runCatching { ncm.close() }.onFailure { clean = false; log("LWIP_CLEANUP_FAILED sessionId=$session error=${it.message}") }
-                runCatching { PioneerLwipNative.close() }.onFailure { clean = false }
+                joinBounded(writer, 2_000)
+                runCatching { ncm.close() }.onFailure {
+                    log("LWIP_CLEANUP_FAILED sessionId=$session error=${it.message}")
+                }
+                if (writer?.isAlive == true) joinBounded(writer, 1_000)
+                val nativeClosed = runCatching { PioneerLwipNative.close() }
+                    .onFailure { log("LWIP_NATIVE_CLOSE_FAILED sessionId=$session error=${it.message}") }
+                    .isSuccess
 
                 output.clear(); completed.clear(); queuedBytes.set(0)
                 PioneerLwipRuntime.end(session)
-                if (clean) ownerLease.set(false)
-                log("LWIP_CLEANUP sessionId=$session writerAlive=${writer?.isAlive == true} atNs=${System.nanoTime()}")
+                val writerAlive = writer?.isAlive == true
+                if (nativeClosed && !writerAlive) ownerLease.set(false)
+                log("LWIP_CLEANUP sessionId=$session writerAlive=$writerAlive leaseReleased=${!ownerLease.get()} atNs=${System.nanoTime()}")
             }
         }, "pioneer-lwip-owner").apply { isDaemon = true; start() }
         if (!ready.await(5, TimeUnit.SECONDS)) { close(); error("lwIP startup timed out") }
@@ -299,14 +304,30 @@ internal class PioneerLwipBridge(
     }
     override fun close() {
         val started = System.nanoTime()
-        running.set(false); writer?.interrupt()
-        // Writer finishes its bounded ioctl before the connection can close/release its FD.
-        writer?.join(2_000)
-        check(writer?.isAlive != true) { "USB writer did not stop; owner lease retained" }
-        runCatching { ncm.close() }
-        if (Thread.currentThread() !== worker) worker?.join(3_000)
-        check(worker?.isAlive != true) { "lwIP worker did not stop; owner lease retained" }
-        log("LWIP_STOP sessionId=$session elapsedUs=${(System.nanoTime()-started)/1000}")
+        running.set(false)
+        rebuild.getAndSet(null)?.countDown()
+        writer?.interrupt()
+        // Writer finishes its bounded ioctl before the connection can close/release its FD;
+        // NcmUsbBridge.close() also serializes on writeLock before closing the USB connection.
+        joinBounded(writer, 2_000)
+        runCatching { ncm.close() }.onFailure {
+            log("LWIP_CLOSE_NCM_FAILED sessionId=$session error=${it.message}")
+        }
+        if (writer?.isAlive == true) joinBounded(writer, 1_000)
+        joinBounded(worker, 3_000)
+        val writerAlive = writer?.isAlive == true
+        val workerAlive = Thread.currentThread() !== worker && worker?.isAlive == true
+        log("LWIP_STOP sessionId=$session writerAlive=$writerAlive workerAlive=$workerAlive elapsedUs=${(System.nanoTime()-started)/1000}")
+        check(!writerAlive) { "USB writer did not stop; owner lease retained" }
+        check(!workerAlive) { "lwIP worker did not stop; owner lease retained" }
+    }
+    private fun joinBounded(thread: Thread?, timeoutMillis: Long) {
+        if (thread == null || thread === Thread.currentThread()) return
+        try {
+            thread.join(timeoutMillis)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
     companion object { private val ownerLease = AtomicBoolean(false) }
 }

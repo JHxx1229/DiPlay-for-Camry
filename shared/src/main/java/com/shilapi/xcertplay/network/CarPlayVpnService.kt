@@ -97,7 +97,12 @@ class CarPlayVpnService : VpnService() {
     ): AttachResult {
         if (active.get() || revokedCleanupPending) {
             Log.i(TAG, "replacing stale NCM/VPN attachment")
-            releaseLocked()
+            try {
+                releaseLocked()
+            } catch (error: Exception) {
+                lastAttachFailure = attachFailure(error)
+                return AttachResult.Failed(error.message ?: error.javaClass.simpleName)
+            }
         }
         vpnRevokeListener = null
         active.set(true)
@@ -244,7 +249,12 @@ class CarPlayVpnService : VpnService() {
     ): AttachResult {
         if (active.get() || revokedCleanupPending) {
             Log.i(TAG, "replacing stale local-only Wi-Fi attachment")
-            releaseLocked()
+            try {
+                releaseLocked()
+            } catch (error: Exception) {
+                lastAttachFailure = attachFailure(error)
+                return AttachResult.Failed(error.message ?: error.javaClass.simpleName)
+            }
         }
         vpnRevokeListener = null
         active.set(true)
@@ -257,7 +267,7 @@ class CarPlayVpnService : VpnService() {
             )
             AttachResult.Started
         } catch (error: Exception) {
-            releaseLocked()
+            runCatching { releaseLocked() }.onFailure(error::addSuppressed)
             lastAttachFailure = attachFailure(error)
             AttachResult.Failed(error.message ?: error.javaClass.simpleName)
         }
@@ -302,7 +312,7 @@ class CarPlayVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        detach()
+        runCatching { detach() }.onFailure { Log.w(TAG, "Failed to detach CarPlay VPN on destroy", it) }
         super.onDestroy()
     }
 
@@ -520,17 +530,31 @@ class CarPlayVpnService : VpnService() {
         additionalServers = emptyList()
         closeSessionsLocked()
         lwipControlPort?.close(); lwipControlPort = null
-        lwipBridge?.close()
+        val closingLwip = lwipBridge
         lwipBridge = null
-        // Ipv6NcmBridge.close also closes its TUN descriptor: release rules first.
-        vpnFirewall?.close()
+        val closingFirewall = vpnFirewall
         vpnFirewall = null
-        bridge?.close()
+        val closingBridge = bridge
         bridge = null
-        tun?.close()
+        val closingTun = tun
         tun = null
-        pioneerSession?.close()
+        val closingPioneerSession = pioneerSession
         pioneerSession = null
+        var releaseFailure: Throwable? = null
+        fun closeStep(step: () -> Unit) {
+            try {
+                step()
+            } catch (error: Throwable) {
+                if (releaseFailure == null) releaseFailure = error else releaseFailure?.addSuppressed(error)
+            }
+        }
+        closeStep { closingLwip?.close() }
+        // Ipv6NcmBridge.close also closes its TUN descriptor: release rules first.
+        closeStep { closingFirewall?.close() }
+        closeStep { closingBridge?.close() }
+        closeStep { closingTun?.close() }
+        closeStep { closingPioneerSession?.close() }
+        releaseFailure?.let { throw it }
     }
 
     companion object {
